@@ -1,0 +1,10 @@
+{
+  "tableName": "mock-data-table-1",
+  "mode": "live",
+  "timestamp": "2025-07-02T13:14:00Z",
+  "processedCount": 0,
+  "streamArn": "arn:aws:dynamodb:ddblocal:000000000000:table/mock-data-table-1/stream/2025-06-30T01:51:59.863",
+  "initialMigrationComplete": true,
+  "startTime": "2025-07-02T20:55:56.368036+08:00",
+  "lastUpdated": "2025-07-02T21:14:05.962714+08:00"
+}

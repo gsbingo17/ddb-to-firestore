@@ -1,0 +1,50 @@
+{
+  "migration": {
+    "mode": "live",
+    "batchSize": 200,
+    "checkpointFrequency": 1,
+    "maxRetries": 3,
+    "retryDelayMs": 1000
+  },
+  "parallelism": {
+    "dynamodbReaders": 4,
+    "firestoreWriters": 4,
+    "segmentCount": 1,
+    "maxConcurrentPairs": 1
+  },
+  "firestore": {
+   "connectionString": "mongodb://localhost:27017"
+  },
+  "databasePairs": [
+    {
+      "name": "users-migration",
+      "source": {
+        "region": "us-west-2",
+        "tableName": "mock-data-table-1",
+        "endpoint": "http://localhost:32331"
+      },
+      "target": {
+        "database": "my-database",
+        "collection": "mock_data"
+      },
+      "mapping": {
+        "collectionNaming": "preserve",
+        "fieldNaming": "preserve",
+        "indexCreation": true,
+        "primaryKeyMapping": {
+          "sourceField": "id",
+          "targetField": "_id"
+        }
+      }
+    }
+  ],
+  "checkpoint": {
+    "storage": "file",
+    "path": "./checkpoints"
+  },
+  "logging": {
+    "level": "info",
+    "format": "json",
+    "output": "stdout"
+  }
+}
