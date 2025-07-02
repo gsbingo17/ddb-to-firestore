@@ -77,7 +77,7 @@ Create a `config.json` file based on the example:
 {
   "migration": {
     "mode": "migrate",
-    "batchSize": 1000,
+    "batchSize": 128,
     "checkpointFrequency": 100,
     "maxRetries": 3,
     "retryDelayMs": 1000
@@ -88,7 +88,7 @@ Create a `config.json` file based on the example:
     "segmentCount": 8
   },
   "firestore": {
-    "connectionString": "mongodb://localhost:27017"
+    "connectionString": "mongodb://UID.LOCATION.firestore.goog:443/DATABASE_ID?loadBalanced=true&tls=true&retryWrites=false"
   },
   "databasePairs": [
     {
@@ -173,16 +173,6 @@ Each pair defines:
 
 **Note**: Live replication automatically resumes from the last checkpoint when restarted, even without the `--resume` flag. The `--resume` flag is optional for live mode and primarily used for migrate mode.
 
-### Process Specific Pairs
-```bash
-./ddb-to-firestore migrate --config config.json --pairs "users-migration,orders-migration"
-```
-
-### Parallel Migration
-```bash
-./ddb-to-firestore migrate --config config.json --segments 16
-```
-
 ### Dry Run
 ```bash
 ./ddb-to-firestore migrate --config config.json --dry-run
@@ -218,7 +208,7 @@ Reference in config:
 ```json
 {
   "firestore": {
-    "connectionString": "mongodb://localhost:27017/${FIRESTORE_PROJECT_ID}"
+    "connectionString": "mongodb://UID.LOCATION.firestore.goog:443/DATABASE_ID?loadBalanced=true&tls=true&retryWrites=false"
   }
 }
 ```
@@ -240,30 +230,8 @@ The tool uses a robust checkpoint system:
 - Tracks progress per shard
 - Validates stream ARN compatibility on resume
 
-### Auto-Resume Behavior
-
-**Live Mode Auto-Resume Logic:**
-1. **Always checks for existing checkpoints** when starting live replication
-2. **If checkpoint exists**: Automatically resumes from last processed timestamp
-3. **If no checkpoint**: Starts new replication with initial migration
-4. **Stream ARN validation**: Warns and updates if stream ARN has changed
-5. **No data loss**: Ensures no stream records are missed during downtime
-
-**Example Scenarios:**
-```bash
-# First run - creates new checkpoint and runs initial migration
-./ddb-to-firestore live --config config.json
-
-# Restart after crash - automatically resumes from checkpoint
-./ddb-to-firestore live --config config.json  # No --resume needed!
-
-# Force new replication (future enhancement)
-./ddb-to-firestore live --config config.json --force-new
-```
-
 ### Checkpoint Storage
 - **File**: JSON files in specified directory
-- **MongoDB**: Store checkpoints in MongoDB collection
 
 ## Data Type Mapping
 
@@ -375,133 +343,6 @@ Add primary key mapping to your database pair configuration:
 }
 ```
 
-### **Operation Examples**
-
-#### **INSERT Operation:**
-```
-DynamoDB: INSERT {"id": "user123", "name": "John"}
-MongoDB: db.collection.insertOne({"_id": "user123", "name": "John"})
-```
-
-#### **UPDATE Operation:**
-```
-DynamoDB: UPDATE SET name = "John Smith" WHERE id = "user123"
-MongoDB: db.collection.replaceOne({"_id": "user123"}, {"_id": "user123", "name": "John Smith", ...})
-```
-
-#### **DELETE Operation:**
-```
-DynamoDB: DELETE WHERE id = "user123"
-MongoDB: db.collection.deleteOne({"_id": "user123"})
-```
-
-### **Benefits**
-
-- ✅ **Correct Update Behavior**: Updates modify existing documents instead of creating duplicates
-- ✅ **Accurate Delete Operations**: Deletes target the correct documents
-- ✅ **Data Consistency**: Maintains proper data synchronization
-- ✅ **Configurable**: Supports different DynamoDB key naming conventions
-
-## Enhanced Live Mode Logic
-
-### **Two-Stage Live Replication**
-
-Live mode now uses an intelligent two-stage approach:
-
-#### **Stage 1: Initial Migration**
-- **Purpose**: Migrate existing data without checkpointing complexity
-- **Method**: Uses `MigrateSimple()` - streamlined migration without segment checkpoints
-- **Behavior**: Fast, simple migration optimized for getting to streaming quickly
-
-#### **Stage 2: Stream Processing**
-- **Purpose**: Process real-time changes from DynamoDB Streams
-- **Method**: Uses timestamp-based checkpointing for stream records
-- **Behavior**: Continuous processing with proper checkpoint management
-
-### **Initial Migration Completion Tracking**
-
-The system now tracks whether the initial migration has completed:
-
-```json
-// Checkpoint during initial migration
-{
-  "tableName": "users-table",
-  "mode": "live",
-  "timestamp": "2025-07-02T20:22:00.000Z",
-  "initialMigrationComplete": false,
-  "startTime": "2025-07-02T20:22:00.000Z"
-}
-
-// Checkpoint after initial migration completes
-{
-  "tableName": "users-table", 
-  "mode": "live",
-  "timestamp": "2025-07-02T20:22:00.000Z",
-  "initialMigrationComplete": true,
-  "startTime": "2025-07-02T20:22:00.000Z"
-}
-```
-
-### **Smart Resume Logic**
-
-The enhanced resume logic handles different failure scenarios:
-
-#### **Scenario 1: Fresh Start**
-```bash
-./ddb-to-firestore live --config config.json
-# Creates checkpoint with initialMigrationComplete: false
-# Runs initial migration → Sets initialMigrationComplete: true
-# Starts stream processing
-```
-
-#### **Scenario 2: Migration Failed, System Restarts**
-```bash
-# Previous run failed during migration
-./ddb-to-firestore live --config config.json
-# Finds checkpoint with initialMigrationComplete: false
-# Runs migration again → Sets initialMigrationComplete: true
-# Starts stream processing
-```
-
-#### **Scenario 3: Stream Processing Failed, System Restarts**
-```bash
-# Previous run completed migration but stream processing failed
-./ddb-to-firestore live --config config.json
-# Finds checkpoint with initialMigrationComplete: true
-# Skips migration
-# Resumes stream processing from last timestamp
-```
-
-### **Benefits of Enhanced Live Mode**
-
-- ✅ **Reliable Resume**: Correctly handles migration vs. streaming failures
-- ✅ **No Duplicate Work**: Skips migration when already completed
-- ✅ **Fast Recovery**: Quick restart for stream processing failures
-- ✅ **Clear State Tracking**: Explicit tracking of migration completion
-
-## Custom Transformations
-
-Transform specific fields during migration:
-
-```json
-{
-  "customTransforms": [
-    {
-      "field": "createdAt",
-      "type": "datetime"
-    },
-    {
-      "field": "price",
-      "type": "decimal128"
-    },
-    {
-      "field": "tags",
-      "type": "array"
-    }
-  ]
-}
-```
-
 ## Monitoring and Logging
 
 ### Structured Logging
@@ -547,103 +388,6 @@ The tool provides detailed progress information:
 - Graceful shutdown handling
 - Comprehensive error logging
 
-## Performance Tuning
-
-### For Large Tables
-```json
-{
-  "parallelism": {
-    "dynamodbReaders": 8,
-    "firestoreWriters": 12,
-    "segmentCount": 20
-  },
-  "migration": {
-    "batchSize": 2000
-  }
-}
-```
-
-### For High Throughput
-```json
-{
-  "parallelism": {
-    "dynamodbReaders": 8,
-    "firestoreWriters": 16,
-    "segmentCount": 12
-  },
-  "migration": {
-    "batchSize": 500,
-    "retryDelayMs": 500
-  }
-}
-```
-
-## Stream Processing Architecture
-
-### **Improved Shard Processing (v2.0)**
-
-The tool now uses an optimized approach for DynamoDB Streams processing:
-
-#### **Unlimited Shard Concurrency**
-- **All shards process simultaneously**: No artificial limits on concurrent shard processing
-- **Natural rate limiting**: Relies on DynamoDB Streams' built-in rate limits (1000 records/sec per shard)
-- **Better resource utilization**: Eliminates bottlenecks from semaphore-based concurrency control
-
-#### **Architecture Comparison**
-
-| Aspect | Migration Mode | Stream Replication Mode |
-|--------|----------------|------------------------|
-| **Parallelism Control** | `dynamodbReaders` controls table scan segments | **No limits** - all shards process concurrently |
-| **Data Source** | DynamoDB table scan | DynamoDB Streams shards |
-| **Concurrency Unit** | Table segments (limited) | Stream shards (unlimited) |
-| **Processing Pattern** | Parallel segments → batch writes | **All shards parallel** → sequential records → batch writes |
-
-#### **Stream Processing Flow**
-```
-DynamoDB Stream
-├── Shard 1 ──┐
-├── Shard 2 ──┤
-├── Shard 3 ──┼── All Shards Process Concurrently ──┐
-├── Shard 4 ──┤                                      ├── Batch Writer Pool
-└── Shard N ──┘                                      └── (firestoreWriters=4)
-```
-
-#### **Key Benefits**
-1. **Maximum Throughput**: All available shards process data simultaneously
-2. **Simplified Configuration**: No need to tune shard concurrency parameters
-3. **Auto-Scaling**: Automatically adapts to the number of active shards
-4. **Order Preservation**: Records within each shard maintain chronological order
-
-#### **Performance Characteristics**
-- **Shard Independence**: Each shard operates at its own optimal pace
-- **Natural Backpressure**: DynamoDB Streams provides built-in rate limiting
-- **Memory Efficiency**: Each shard uses minimal memory footprint
-- **Error Isolation**: Failed shards don't impact other shard processing
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Connection Timeouts**
-   - Increase `wtimeout` in write concern
-   - Check network connectivity
-   - Verify credentials
-
-2. **Memory Usage**
-   - Reduce `batchSize`
-   - Lower `parallelism` settings
-   - Monitor system resources
-
-3. **Stream Processing Errors**
-   - Verify DynamoDB Streams is enabled
-   - Check IAM permissions
-   - Monitor shard iterator expiration
-
-### Debug Mode
-```bash
-./ddb-to-firestore migrate --config config.json --debug
-```
-
 ## Development
 
 ### Project Structure
@@ -662,45 +406,6 @@ ddb-to-mongodb/
 └── docs/               # Documentation
 ```
 
-### Building
-```bash
-# Build for current platform
-go build -o ddb-to-firestore ./cmd/migrate
-
-# Build for Linux
-GOOS=linux GOARCH=amd64 go build -o ddb-to-firestore-linux ./cmd/migrate
-
-# Build for Windows  
-GOOS=windows GOARCH=amd64 go build -o ddb-to-firestore.exe ./cmd/migrate
-```
-
-### Testing
-```bash
-# Run tests
-go test ./...
-
-# Run tests with coverage
-go test -cover ./...
-
-# Run integration tests
-go test -tags=integration ./...
-```
-
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## Support
-
-For issues and questions:
-- Create an issue in the repository
-- Check the troubleshooting section
-- Review the configuration examples

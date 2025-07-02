@@ -2,7 +2,7 @@
   "migration": {
     "mode": "live",
     "batchSize": 200,
-    "checkpointFrequency": 1,
+    "checkpointFrequency": 10,
     "maxRetries": 3,
     "retryDelayMs": 1000
   },
@@ -13,7 +13,7 @@
     "maxConcurrentPairs": 1
   },
   "firestore": {
-   "connectionString": "mongodb://localhost:27017"
+   "connectionString": "mongodb://UID.LOCATION.firestore.goog:443/DATABASE_ID?loadBalanced=true&tls=true&retryWrites=false"
   },
   "databasePairs": [
     {
