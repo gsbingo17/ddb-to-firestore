@@ -167,7 +167,8 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Configuration is valid!\n")
 	fmt.Printf("Mode: %s\n", cfg.Migration.Mode)
 	fmt.Printf("Database pairs: %d\n", len(cfg.DatabasePairs))
-	fmt.Printf("Firestore connection: %s\n", maskConnectionString(cfg.Firestore.ConnectionString))
+	fmt.Printf("Firestore Project: %s\n", cfg.Firestore.ProjectID)
+	fmt.Printf("Firestore Database: %s\n", cfg.Firestore.DatabaseID)
 
 	return nil
 }

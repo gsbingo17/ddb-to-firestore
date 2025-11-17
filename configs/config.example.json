@@ -1,0 +1,58 @@
+{
+  "migration": {
+    "mode": "migrate",
+    "batchSize": 128,
+    "checkpointFrequency": 100,
+    "maxRetries": 3,
+    "retryDelayMs": 1000
+  },
+  "parallelism": {
+    "dynamodbReaders": 4,
+    "firestoreWriters": 4,
+    "segmentCount": 0
+  },
+  "firestore": {
+    "projectId": "your-project",
+    "databaseId": "you-db",
+    "timeouts": {
+      "connectionTimeoutMs": 30000,
+      "pingTimeoutMs": 30000,
+      "operationTimeoutMs": 60000
+    },
+    "maxRetries": 3
+  },
+  "databasePairs": [
+    {
+      "name": "users-migration",
+      "source": {
+        "region": "us-west-2",
+        "tableName": "mock-data-table-2",
+        "endpoint": "http://localhost:8000"
+      },
+      "target": {
+        "database": "your-db",
+        "collection": "mock-data-table"
+      },
+      "mapping": {
+        "collectionNaming": "preserve",
+        "fieldNaming": "preserve",
+        "indexCreation": false
+      }
+    }
+  ],
+  "pairProcessing": {
+    "orders-migration": {
+      "batchSize": 200,
+      "maxRetries": 5
+    }
+  },
+  "checkpoint": {
+    "storage": "file",
+    "path": "./checkpoints"
+  },
+  "logging": {
+    "level": "info",
+    "format": "json",
+    "output": "stdout"
+  }
+}

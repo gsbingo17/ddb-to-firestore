@@ -5,40 +5,42 @@ import (
 	"fmt"
 	"time"
 
-	"ddb-to-firestore/internal/config"
-
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
-	"go.mongodb.org/mongo-driver/mongo/readpref"
-	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+	"cloud.google.com/go/firestore"
+	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"go.uber.org/zap"
+
+	"ddb-to-firestore/internal/config"
 )
 
-// Client wraps MongoDB client and provides database operations
+// Client wraps Firestore client and provides database operations
 type Client struct {
-	client *mongo.Client
-	config config.FirestoreConfig
-	logger *zap.Logger
+	client    *firestore.Client
+	projectID string
+	config    config.FirestoreConfig
+	logger    *zap.Logger
 }
 
-// Operation represents a MongoDB operation
+// Operation represents a Firestore operation
 type Operation interface {
-	Execute(ctx context.Context, collection *mongo.Collection) error
+	Execute(ctx context.Context, batch *firestore.WriteBatch, collection *firestore.CollectionRef) error
 }
 
-// UpsertOperation represents an upsert operation
+// UpsertOperation represents a document set operation
 type UpsertOperation struct {
-	Document map[string]interface{}
-	Filter   map[string]interface{}
+	DocumentID  string                 // Firestore document ID (empty string = auto-generate)
+	Document    map[string]interface{} // Document data
+	OriginalKey map[string]interface{} // DynamoDB original key to store
 }
 
-// DeleteOperation represents a delete operation
+// DeleteOperation represents a document delete operation
 type DeleteOperation struct {
-	Filter map[string]interface{}
+	DocumentID string // Firestore document ID to delete
 }
 
-// CollectionInfo contains information about a MongoDB collection
+// CollectionInfo contains information about a Firestore collection
 type CollectionInfo struct {
 	Name          string
 	DocumentCount int64
@@ -46,106 +48,51 @@ type CollectionInfo struct {
 
 // NewClient creates a new Firestore client
 func NewClient(cfg config.FirestoreConfig, logger *zap.Logger) (*Client, error) {
-	// Create client options
-	clientOpts := options.Client().ApplyURI(cfg.ConnectionString)
+	ctx := context.Background()
 
-	// Set read preference
-	if cfg.ReadPreference != "" {
-		readPref, err := parseReadPreference(cfg.ReadPreference)
-		if err != nil {
-			return nil, fmt.Errorf("invalid read preference: %w", err)
-		}
-		clientOpts.SetReadPreference(readPref)
+	// Set timeout for client creation
+	if cfg.Timeouts != nil && cfg.Timeouts.ConnectionTimeoutMs > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx,
+			time.Duration(cfg.Timeouts.ConnectionTimeoutMs)*time.Millisecond)
+		defer cancel()
 	}
 
-	// Set write concern
-	if cfg.WriteConcern != nil {
-		wc, err := parseWriteConcern(cfg.WriteConcern)
-		if err != nil {
-			return nil, fmt.Errorf("invalid write concern: %w", err)
-		}
-		clientOpts.SetWriteConcern(wc)
+	// Create Firestore client with credentials
+	var opts []option.ClientOption
+	if cfg.CredentialsFile != "" {
+		opts = append(opts, option.WithCredentialsFile(cfg.CredentialsFile))
 	}
 
-	// Connect to MongoDB
-	client, err := mongo.Connect(context.Background(), clientOpts)
+	// Specify database if not default
+	databaseID := cfg.DatabaseID
+	if databaseID == "" {
+		databaseID = "(default)"
+	}
+
+	client, err := firestore.NewClientWithDatabase(ctx, cfg.ProjectID, databaseID, opts...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
+		return nil, fmt.Errorf("failed to create Firestore client: %w", err)
 	}
 
-	// Test the connection
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := client.Ping(ctx, nil); err != nil {
-		client.Disconnect(context.Background())
-		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
-	}
-
-	logger.Info("Connected to MongoDB", zap.String("uri", maskConnectionString(cfg.ConnectionString)))
+	logger.Info("Connected to Firestore",
+		zap.String("projectId", cfg.ProjectID),
+		zap.String("databaseId", databaseID))
 
 	return &Client{
-		client: client,
-		config: cfg,
-		logger: logger,
+		client:    client,
+		projectID: cfg.ProjectID,
+		config:    cfg,
+		logger:    logger,
 	}, nil
 }
 
-// Close closes the MongoDB client connection
+// Close closes the Firestore client connection
 func (c *Client) Close() error {
 	if c.client != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return c.client.Disconnect(ctx)
+		return c.client.Close()
 	}
 	return nil
-}
-
-// Ping tests the connection to MongoDB
-func (c *Client) Ping(ctx context.Context) error {
-	return c.client.Ping(ctx, nil)
-}
-
-// ValidateCollection validates that the collection can be accessed
-func (c *Client) ValidateCollection(ctx context.Context, database, collection string) error {
-	db := c.client.Database(database)
-
-	// Validate that the database exists and is accessible by listing collections.
-	// Firestore's MongoDB compatibility layer does not support 'collStats'.
-	_, err := db.ListCollectionNames(ctx, bson.M{})
-	if err != nil {
-		return fmt.Errorf("failed to list collections in database %s: %w", database, err)
-	}
-
-	// Firestore's MongoDB API does not support creating indexes.
-	// We will skip explicit write access validation via index creation.
-	// Actual write operations will validate write access during runtime.
-
-	return nil
-}
-
-// GetCollectionInfo gets information about a MongoDB collection
-func (c *Client) GetCollectionInfo(ctx context.Context, database, collection string) (*CollectionInfo, error) {
-	db := c.client.Database(database)
-	coll := db.Collection(collection)
-
-	info := &CollectionInfo{
-		Name: collection,
-	}
-
-	// Get document count using CountDocuments, as collStats is not supported by Firestore.
-	// StorageSize is not available via this method and will not be displayed.
-	docCount, err := coll.CountDocuments(ctx, bson.M{}) // Count all documents
-	if err != nil {
-		if isNamespaceNotFoundError(err) {
-			// Collection doesn't exist yet
-			return info, nil
-		}
-		return nil, fmt.Errorf("failed to get document count: %w", err)
-	}
-	info.DocumentCount = docCount
-
-	return info, nil
 }
 
 // ExecuteBatch executes a batch of operations on a collection
@@ -154,201 +101,190 @@ func (c *Client) ExecuteBatch(ctx context.Context, database, collection string, 
 		return nil
 	}
 
-	db := c.client.Database(database)
-	coll := db.Collection(collection)
+	// Firestore batch limit is 500 operations
+	const maxBatchSize = 500
 
-	// Execute operations in a batch
-	var models []mongo.WriteModel
-	for _, op := range operations {
-		switch operation := op.(type) {
-		case *UpsertOperation:
-			filter := operation.Filter
-			if filter == nil {
-				// If no filter specified, use _id from document
-				if id, exists := operation.Document["_id"]; exists {
-					filter = bson.M{"_id": id}
-				} else {
-					// No filter and no _id, treat as insert
-					model := mongo.NewInsertOneModel().SetDocument(operation.Document)
-					models = append(models, model)
-					continue
-				}
-			}
+	for i := 0; i < len(operations); i += maxBatchSize {
+		end := i + maxBatchSize
+		if end > len(operations) {
+			end = len(operations)
+		}
 
-			model := mongo.NewReplaceOneModel().
-				SetFilter(filter).
-				SetReplacement(operation.Document).
-				SetUpsert(true)
-			models = append(models, model)
-
-		case *DeleteOperation:
-			model := mongo.NewDeleteOneModel().SetFilter(operation.Filter)
-			models = append(models, model)
-
-		default:
-			return fmt.Errorf("unsupported operation type: %T", op)
+		batch := operations[i:end]
+		if err := c.executeBatchChunk(ctx, collection, batch); err != nil {
+			return fmt.Errorf("batch chunk %d-%d failed: %w", i, end, err)
 		}
 	}
 
-	if len(models) == 0 {
-		return nil
+	return nil
+}
+
+// executeBatchChunk executes a single batch chunk (max 500 operations)
+func (c *Client) executeBatchChunk(ctx context.Context, collectionName string, operations []Operation) error {
+	batch := c.client.Batch()
+	coll := c.client.Collection(collectionName)
+
+	var upsertCount, deleteCount int
+
+	for _, op := range operations {
+		if err := op.Execute(ctx, batch, coll); err != nil {
+			return fmt.Errorf("failed to add operation to batch: %w", err)
+		}
+
+		switch op.(type) {
+		case *UpsertOperation:
+			upsertCount++
+		case *DeleteOperation:
+			deleteCount++
+		}
 	}
 
-	// Execute bulk write
-	opts := options.BulkWrite().SetOrdered(false) // Allow parallel execution
-	result, err := coll.BulkWrite(ctx, models, opts)
+	// Commit the batch
+	_, err := batch.Commit(ctx)
 	if err != nil {
-		return fmt.Errorf("bulk write failed: %w", err)
+		return fmt.Errorf("batch commit failed: %w", err)
 	}
 
-	c.logger.Debug("Bulk write completed",
-		zap.String("database", database),
-		zap.String("collection", collection),
-		zap.Int("operations", len(operations)),
-		zap.Int64("inserted", result.InsertedCount),
-		zap.Int64("modified", result.ModifiedCount),
-		zap.Int64("upserted", result.UpsertedCount),
-		zap.Int64("deleted", result.DeletedCount))
+	c.logger.Debug("Batch write completed",
+		zap.String("collection", collectionName),
+		zap.Int("totalOps", len(operations)),
+		zap.Int("upserts", upsertCount),
+		zap.Int("deletes", deleteCount))
 
 	return nil
 }
 
-// UpsertDocument upserts a single document
-func (c *Client) UpsertDocument(ctx context.Context, database, collection string, filter, document map[string]interface{}) error {
-	db := c.client.Database(database)
-	coll := db.Collection(collection)
+// GetCollectionInfo gets information about a Firestore collection
+func (c *Client) GetCollectionInfo(ctx context.Context, database, collection string) (*CollectionInfo, error) {
+	coll := c.client.Collection(collection)
 
-	opts := options.Replace().SetUpsert(true)
-	_, err := coll.ReplaceOne(ctx, filter, document, opts)
-	if err != nil {
-		return fmt.Errorf("upsert failed: %w", err)
+	// Count documents
+	docCount := int64(0)
+	iter := coll.Documents(ctx)
+	defer iter.Stop()
+
+	for {
+		_, err := iter.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to iterate documents: %w", err)
+		}
+		docCount++
+	}
+
+	return &CollectionInfo{
+		Name:          collection,
+		DocumentCount: docCount,
+	}, nil
+}
+
+// ValidateCollection validates that the collection can be accessed
+func (c *Client) ValidateCollection(ctx context.Context, database, collection string) error {
+	coll := c.client.Collection(collection)
+
+	// Try to get collection reference (doesn't require collection to exist)
+	if coll == nil {
+		return fmt.Errorf("failed to get collection reference: %s", collection)
 	}
 
 	return nil
 }
 
-// DeleteDocument deletes a single document
-func (c *Client) DeleteDocument(ctx context.Context, database, collection string, filter map[string]interface{}) error {
-	db := c.client.Database(database)
-	coll := db.Collection(collection)
-
-	_, err := coll.DeleteOne(ctx, filter)
-	if err != nil {
-		return fmt.Errorf("delete failed: %w", err)
+// Ping tests the connection to Firestore
+func (c *Client) Ping(ctx context.Context) error {
+	// Try to list collections as a ping test
+	iter := c.client.Collections(ctx)
+	_, err := iter.Next()
+	if err != nil && err != iterator.Done {
+		return fmt.Errorf("firestore ping failed: %w", err)
 	}
-
 	return nil
 }
 
-// CreateIndex creates an index on a collection
-func (c *Client) CreateIndex(ctx context.Context, database, collection string, keys bson.D, options *options.IndexOptions) error {
-	db := c.client.Database(database)
-	coll := db.Collection(collection)
+// FindDocumentByKey finds a document by its DynamoDB key components
+func (c *Client) FindDocumentByKey(ctx context.Context, collectionName string, partitionKey, sortKey interface{}, mapping *config.PrimaryKeyMapping) (string, error) {
+	coll := c.client.Collection(collectionName)
 
-	indexModel := mongo.IndexModel{
-		Keys:    keys,
-		Options: options,
+	// Build query based on key type
+	var query firestore.Query
+
+	if mapping.CompositeKeyField != "" && sortKey != nil {
+		// Use composite key field for faster single-field query
+		delimiter := mapping.Delimiter
+		if delimiter == "" {
+			delimiter = "#"
+		}
+		compositeKey := fmt.Sprintf("%v%s%v", partitionKey, delimiter, sortKey)
+		query = coll.Where(mapping.CompositeKeyField, "==", compositeKey)
+	} else if sortKey != nil && mapping.SortKey != nil {
+		// Composite key: query with both partition and sort key
+		query = coll.Where(mapping.PartitionKey.TargetField, "==", partitionKey).
+			Where(mapping.SortKey.TargetField, "==", sortKey)
+	} else {
+		// Simple key: query with partition key only
+		query = coll.Where(mapping.PartitionKey.TargetField, "==", partitionKey)
 	}
 
-	_, err := coll.Indexes().CreateOne(ctx, indexModel)
-	if err != nil && !mongo.IsDuplicateKeyError(err) {
-		return fmt.Errorf("failed to create index: %w", err)
+	// Execute query
+	docs, err := query.Documents(ctx).GetAll()
+	if err != nil {
+		return "", fmt.Errorf("query failed: %w", err)
 	}
 
-	return nil
+	if len(docs) == 0 {
+		return "", fmt.Errorf("document not found")
+	}
+
+	if len(docs) > 1 {
+		c.logger.Warn("Multiple documents found for key, using first",
+			zap.Int("count", len(docs)))
+	}
+
+	return docs[0].Ref.ID, nil
 }
 
 // Execute implements Operation interface for UpsertOperation
-func (op *UpsertOperation) Execute(ctx context.Context, collection *mongo.Collection) error {
-	filter := op.Filter
-	if filter == nil {
-		if id, exists := op.Document["_id"]; exists {
-			filter = bson.M{"_id": id}
-		} else {
-			// No filter and no _id, treat as insert
-			_, err := collection.InsertOne(ctx, op.Document)
-			return err
-		}
+func (op *UpsertOperation) Execute(ctx context.Context, batch *firestore.WriteBatch, collection *firestore.CollectionRef) error {
+	var docRef *firestore.DocumentRef
+
+	if op.DocumentID != "" {
+		// Use specified document ID
+		docRef = collection.Doc(op.DocumentID)
+	} else {
+		// Auto-generate document ID
+		docRef = collection.NewDoc()
 	}
 
-	opts := options.Replace().SetUpsert(true)
-	_, err := collection.ReplaceOne(ctx, filter, op.Document, opts)
-	return err
+	batch.Set(docRef, op.Document)
+	return nil
 }
 
 // Execute implements Operation interface for DeleteOperation
-func (op *DeleteOperation) Execute(ctx context.Context, collection *mongo.Collection) error {
-	_, err := collection.DeleteOne(ctx, op.Filter)
-	return err
+func (op *DeleteOperation) Execute(ctx context.Context, batch *firestore.WriteBatch, collection *firestore.CollectionRef) error {
+	if op.DocumentID == "" {
+		return fmt.Errorf("document ID is required for delete operation")
+	}
+
+	docRef := collection.Doc(op.DocumentID)
+	batch.Delete(docRef)
+	return nil
 }
 
-// Helper functions
-
-// parseReadPreference parses a read preference string
-func parseReadPreference(pref string) (*readpref.ReadPref, error) {
-	switch pref {
-	case "primary":
-		return readpref.Primary(), nil
-	case "primaryPreferred":
-		return readpref.PrimaryPreferred(), nil
-	case "secondary":
-		return readpref.Secondary(), nil
-	case "secondaryPreferred":
-		return readpref.SecondaryPreferred(), nil
-	case "nearest":
-		return readpref.Nearest(), nil
-	default:
-		return nil, fmt.Errorf("invalid read preference: %s", pref)
+// IsNotFoundError checks if the error is a "not found" error
+func IsNotFoundError(err error) bool {
+	if err == nil {
+		return false
 	}
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.NotFound
 }
 
-// parseWriteConcern parses write concern configuration
-func parseWriteConcern(wc *config.WriteConcernConfig) (*writeconcern.WriteConcern, error) {
-	var opts []writeconcern.Option
-
-	switch v := wc.W.(type) {
-	case string:
-		if v == "majority" {
-			opts = append(opts, writeconcern.WMajority())
-		} else {
-			opts = append(opts, writeconcern.WTagSet(v))
-		}
-	case int:
-		opts = append(opts, writeconcern.W(v))
-	case float64:
-		opts = append(opts, writeconcern.W(int(v)))
-	default:
-		return nil, fmt.Errorf("invalid write concern W value: %v", wc.W)
-	}
-
-	if wc.J {
-		opts = append(opts, writeconcern.J(true))
-	}
-
-	if wc.WTimeout > 0 {
-		opts = append(opts, writeconcern.WTimeout(time.Duration(wc.WTimeout)*time.Millisecond))
-	}
-
-	return writeconcern.New(opts...), nil
-}
-
-// maskConnectionString masks sensitive information in connection string
+// maskConnectionString is a helper function (keeping for compatibility)
 func maskConnectionString(connStr string) string {
 	if len(connStr) < 20 {
 		return "***"
 	}
 	return connStr[:10] + "***" + connStr[len(connStr)-10:]
-}
-
-// isNamespaceNotFoundError checks if the error is a namespace not found error
-func isNamespaceNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	if cmdErr, ok := err.(mongo.CommandError); ok {
-		return cmdErr.Code == 26 // NamespaceNotFound
-	}
-
-	return false
 }

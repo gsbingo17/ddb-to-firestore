@@ -10,7 +10,7 @@ A high-performance, production-ready tool for migrating data from Amazon DynamoD
 
 - **High Performance**:
   - Parallel DynamoDB scanning with configurable segments
-  - Concurrent Firestore with MongoDB writers
+  - Concurrent Firestore writers with batch operations
   - Configurable batch sizes and parallelism per database pair
 
 - **Robust Error Handling**:
@@ -23,10 +23,12 @@ A high-performance, production-ready tool for migrating data from Amazon DynamoD
   - Support for multiple database pairs
   - Per-pair processing overrides
   - Environment variable substitution
+  - Application Default Credentials (ADC) support
 
 - **Data Transformation**:
   - Configurable field naming conventions (preserve, snake_case, camelCase)
-  - **Primary key mapping** (DynamoDB → MongoDB `_id`)
+  - **Composite primary key support** (partition key + optional sort key)
+  - **Auto-generated Firestore document IDs**
   - Custom field transformations (datetime, decimal128, array, object)
   - Automatic data type conversion
 
@@ -34,21 +36,30 @@ A high-performance, production-ready tool for migrating data from Amazon DynamoD
   - Structured logging with configurable levels
   - Health checks and status monitoring
   - Comprehensive error handling and recovery
+  - Native Firestore SDK integration
 
 ## Architecture
 
-The tool replicates the exact same DynamoDB Streams mechanism as the original Node.js implementation:
+The tool uses Google Cloud Firestore Native SDK for optimal performance and reliability:
 
+- Direct integration with Firestore Native API
+- Efficient batch operations (max 500 documents per batch)
+- Support for Application Default Credentials (ADC)
+- Query-based document lookup for live replication
+- Indexed key fields for efficient queries
+
+The replication mechanism mirrors DynamoDB Streams:
 - Uses `TRIM_HORIZON` to read from the beginning of streams
 - Filters records by `ApproximateCreationDateTime` 
 - Handles INSERT, MODIFY, and REMOVE operations
-- Implements the same retry logic and error handling patterns
+- Implements retry logic and error handling patterns
 
 ## Prerequisites
 
 - Go 1.21 or later
 - Access to DynamoDB (AWS account or DynamoDB Local)
-- Google Cloud Firestore project and credentials
+- Google Cloud Firestore project
+- GCP credentials (service account JSON or Application Default Credentials)
 - DynamoDB table with Streams enabled (for live replication)
 
 ## Installation
@@ -88,7 +99,8 @@ Create a `config.json` file based on the example:
     "segmentCount": 8
   },
   "firestore": {
-    "connectionString": "mongodb://UID.LOCATION.firestore.goog:443/DATABASE_ID?loadBalanced=true&tls=true&retryWrites=false"
+    "projectId": "your-gcp-project-id",
+    "credentialsFile": "/path/to/service-account-key.json"
   },
   "databasePairs": [
     {
@@ -106,9 +118,9 @@ Create a `config.json` file based on the example:
         "collectionNaming": "preserve",
         "fieldNaming": "preserve",
         "indexCreation": true,
-        "primaryKeyMapping": {
-          "sourceField": "id",
-          "targetField": "_id"
+        "keyFields": {
+          "partitionKey": "id",
+          "sortKey": ""
         }
       }
     }
@@ -128,7 +140,7 @@ Create a `config.json` file based on the example:
 ### Configuration Options
 
 #### Global Settings
-- `batchSize`: Number of items to process in each batch (default: 1000)
+- `batchSize`: Number of items to process in each batch (default: 128, max: 500 for Firestore)
 - `checkpointFrequency`: Save checkpoint every N records (default: 100)
 - `maxRetries`: Maximum retry attempts for failed operations (default: 3)
 - `retryDelayMs`: Base delay between retries in milliseconds (default: 1000)
@@ -139,7 +151,13 @@ Create a `config.json` file based on the example:
 - `segmentCount`: DynamoDB parallel scan segments (default: 8)
 
 #### Firestore Configuration
-- `connectionString`: MongoDB-compatible connection string for Firestore
+- `projectId`: GCP project ID (required)
+- `credentialsFile`: Path to service account JSON file (optional - uses ADC if not provided)
+
+**Note**: The `credentialsFile` is optional. If not provided, the tool will use Application Default Credentials (ADC), which can be configured via:
+- `GOOGLE_APPLICATION_CREDENTIALS` environment variable
+- GCloud CLI authentication (`gcloud auth application-default login`)
+- Service account attached to compute resources (GCE, Cloud Run, etc.)
 
 #### Database Pairs
 Each pair defines:
@@ -151,7 +169,9 @@ Each pair defines:
 - `collectionNaming`: Collection naming convention (preserve, snake_case, camelCase)
 - `fieldNaming`: Field naming convention (preserve, snake_case, camelCase)
 - `indexCreation`: Auto-create indexes based on DynamoDB keys
-- `primaryKeyMapping`: Map DynamoDB primary key to MongoDB `_id` field
+- `keyFields`: Composite key configuration
+  - `partitionKey`: DynamoDB partition key field name (required)
+  - `sortKey`: DynamoDB sort key field name (optional, leave empty if not used)
 - `customTransforms`: Custom field transformations
 
 ## Usage
@@ -193,24 +213,47 @@ Each pair defines:
 ./ddb-to-firestore validate --config config.json
 ```
 
-## Environment Variables
+## Authentication
 
-Use environment variables for sensitive configuration:
-
-```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
-export FIRESTORE_PROJECT_ID=your-project-id
-export AWS_ACCESS_KEY_ID=your_access_key
-export AWS_SECRET_ACCESS_KEY=your_secret_key
-```
-
-Reference in config:
+### Option 1: Service Account Key File
 ```json
 {
   "firestore": {
-    "connectionString": "mongodb://UID.LOCATION.firestore.goog:443/DATABASE_ID?loadBalanced=true&tls=true&retryWrites=false"
+    "projectId": "your-project-id",
+    "credentialsFile": "/path/to/service-account-key.json"
   }
 }
+```
+
+### Option 2: Application Default Credentials (ADC)
+```json
+{
+  "firestore": {
+    "projectId": "your-project-id"
+  }
+}
+```
+
+Set up ADC using one of these methods:
+```bash
+# Method 1: Environment variable
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
+
+# Method 2: gcloud CLI
+gcloud auth application-default login
+
+# Method 3: Compute resource service account (automatic on GCE/Cloud Run)
+```
+
+### Environment Variables
+
+Use environment variables for configuration:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
+export AWS_ACCESS_KEY_ID=your_access_key
+export AWS_SECRET_ACCESS_KEY=your_secret_key
+export AWS_REGION=us-west-2
 ```
 
 ## Checkpoint System
@@ -235,112 +278,114 @@ The tool uses a robust checkpoint system:
 
 ## Data Type Mapping
 
-| DynamoDB Type | MongoDB Type | Notes |
-|---------------|--------------|-------|
+| DynamoDB Type | Firestore Type | Notes |
+|---------------|----------------|-------|
 | String | String | Direct mapping |
 | Number | Number | Preserves int/float |
 | Boolean | Boolean | Direct mapping |
-| Map/Object | Object | Nested conversion |
+| Map/Object | Map | Nested conversion |
 | List/Array | Array | Element conversion |
-| Binary | String | Base64 encoded |
+| Binary | Bytes | Binary data |
 | String Set | Array | Converted to array |
 | Number Set | Array | Converted to array |
-| Binary Set | Array | Base64 encoded array |
+| Binary Set | Array | Array of bytes |
+| NULL | Null | Direct mapping |
 
-## Primary Key Mapping
+## Composite Primary Key Support
 
-### **Critical Feature for Update/Delete Operations**
+### Overview
 
-The primary key mapping feature ensures that DynamoDB's primary key is correctly mapped to MongoDB's `_id` field, which is essential for proper update and delete operations.
+Firestore documents use auto-generated IDs, but the tool preserves DynamoDB's composite key structure as indexed fields within each document for efficient querying and updates.
 
-### **Problem Without Primary Key Mapping**
+### Key Storage Strategy
 
-**❌ Without primary key mapping:**
+**DynamoDB Table with Composite Key:**
 ```json
-// DynamoDB Item
+// Partition Key: "userId"
+// Sort Key: "timestamp"
 {
-  "id": "user123",
+  "userId": "user123",
+  "timestamp": "2024-01-15T10:30:00Z",
   "name": "John Doe",
   "email": "john@example.com"
 }
-
-// MongoDB Document (WRONG)
-{
-  "id": "user123",           // Should be _id
-  "name": "John Doe",
-  "email": "john@example.com"
-}
-
-// Result: Updates create new documents instead of updating existing ones
 ```
 
-**✅ With primary key mapping:**
+**Firestore Document:**
 ```json
-// DynamoDB Item
+// Document ID: auto-generated (e.g., "abc123xyz")
 {
-  "id": "user123",
-  "name": "John Doe", 
-  "email": "john@example.com"
-}
-
-// MongoDB Document (CORRECT)
-{
-  "_id": "user123",          // Mapped from id
+  "__key_userId": "user123",        // Indexed partition key
+  "__key_timestamp": "2024-01-15T10:30:00Z",  // Indexed sort key
+  "userId": "user123",              // Original field
+  "timestamp": "2024-01-15T10:30:00Z",  // Original field
   "name": "John Doe",
   "email": "john@example.com"
 }
-
-// Result: Updates correctly modify existing documents
 ```
 
-### **Configuration**
-
-Add primary key mapping to your database pair configuration:
+### Configuration
 
 ```json
 {
-  "databasePairs": [
-    {
-      "name": "users-migration",
-      "mapping": {
-        "collectionNaming": "preserve",
-        "fieldNaming": "preserve",
-        "indexCreation": true,
-        "primaryKeyMapping": {
-          "sourceField": "id",
-          "targetField": "_id"
-        }
-      }
+  "mapping": {
+    "keyFields": {
+      "partitionKey": "userId",
+      "sortKey": "timestamp"
     }
-  ]
+  }
 }
 ```
 
-### **Configuration Options**
+### Simple Primary Key (No Sort Key)
 
-- **`sourceField`**: The DynamoDB primary key field name (e.g., "id", "userId", "pk")
-- **`targetField`**: The MongoDB target field name (typically "_id")
-
-### **Common Primary Key Mappings**
+For tables with only a partition key:
 
 ```json
-// Simple ID mapping
-"primaryKeyMapping": {
-  "sourceField": "id",
-  "targetField": "_id"
+{
+  "mapping": {
+    "keyFields": {
+      "partitionKey": "id",
+      "sortKey": ""
+    }
+  }
 }
+```
 
-// User ID mapping
-"primaryKeyMapping": {
-  "sourceField": "userId",
-  "targetField": "_id"
+**DynamoDB:**
+```json
+{
+  "id": "user123",
+  "name": "John Doe"
 }
+```
 
-// Custom partition key
-"primaryKeyMapping": {
-  "sourceField": "pk",
-  "targetField": "_id"
+**Firestore:**
+```json
+// Document ID: auto-generated
+{
+  "__key_id": "user123",  // Indexed partition key
+  "id": "user123",        // Original field
+  "name": "John Doe"
 }
+```
+
+### Benefits
+
+1. **Auto-generated IDs**: Firestore manages document IDs automatically
+2. **Efficient Queries**: Indexed key fields enable fast lookups
+3. **Update Support**: Live replication can find and update existing documents
+4. **Preserved Structure**: Original DynamoDB fields remain unchanged
+
+### Live Replication Updates
+
+During live replication, the tool uses indexed key fields to locate documents:
+
+```go
+// Query for existing document using composite key
+query := collection.
+    Where("__key_userId", "==", "user123").
+    Where("__key_timestamp", "==", "2024-01-15T10:30:00Z")
 ```
 
 ## Monitoring and Logging
@@ -376,7 +421,7 @@ The tool provides detailed progress information:
 ### Retry Logic
 - Exponential backoff with configurable delays
 - Per-operation retry limits
-- Special handling for duplicate key errors
+- Special handling for transient errors
 
 ### Stream Processing
 - Handles expired shard iterators
@@ -388,16 +433,24 @@ The tool provides detailed progress information:
 - Graceful shutdown handling
 - Comprehensive error logging
 
+## Batch Operations
+
+Firestore Native SDK enforces a maximum of 500 operations per batch:
+
+- Configure `batchSize` to 500 or less
+- Tool automatically splits larger batches
+- Optimal performance typically achieved with 128-256 documents per batch
+
 ## Development
 
 ### Project Structure
 ```
-ddb-to-mongodb/
+ddb-to-firestore/
 ├── cmd/migrate/           # CLI entry point
 ├── internal/
 │   ├── config/           # Configuration management
 │   ├── dynamodb/         # DynamoDB client
-│   ├── mongodb/          # MongoDB client  
+│   ├── firestore/        # Firestore client (Native SDK)
 │   ├── checkpoint/       # Checkpoint management
 │   ├── converter/        # Data conversion
 │   ├── processor/        # Migration logic
@@ -405,6 +458,37 @@ ddb-to-mongodb/
 ├── configs/             # Configuration examples
 └── docs/               # Documentation
 ```
+
+### Running Tests
+```bash
+go test ./...
+```
+
+### Building
+```bash
+make build
+```
+
+## Migration from MongoDB API
+
+If you're migrating from the MongoDB-compatible API version, see [MIGRATION_TO_FIRESTORE_NATIVE.md](MIGRATION_TO_FIRESTORE_NATIVE.md) for detailed migration instructions.
+
+## Troubleshooting
+
+### Authentication Errors
+- Verify `projectId` is correct
+- Ensure service account has Firestore permissions
+- Check ADC setup if not using `credentialsFile`
+
+### Performance Issues
+- Adjust `batchSize` (128-256 recommended)
+- Increase `firestoreWriters` for more parallelism
+- Monitor Firestore quota limits
+
+### Stream Processing
+- Verify DynamoDB Streams is enabled
+- Check IAM permissions for stream access
+- Review checkpoint files for resume state
 
 ## License
 

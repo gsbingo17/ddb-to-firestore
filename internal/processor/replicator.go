@@ -464,30 +464,30 @@ func (r *Replicator) processRecordBatch(ctx context.Context, records []dynamodb.
 
 		switch record.EventName {
 		case "REMOVE":
-			// Handle DELETE - use proper primary key mapping
+			// Handle DELETE - find document by key then delete
 			if record.DynamoDB.Keys != nil {
-				deleteFilter := r.createDeleteFilter(record.DynamoDB.Keys)
-				if deleteFilter != nil {
-					operation = &firestore.DeleteOperation{
-						Filter: deleteFilter,
-					}
-				} else {
-					logger.Warn("Failed to create delete filter for REMOVE event")
+				documentID, findErr := r.findDocumentIDByKeys(ctx, record.DynamoDB.Keys)
+				if findErr != nil {
+					logger.Warn("Failed to find document for REMOVE event", zap.Error(findErr))
 					continue
+				}
+				operation = &firestore.DeleteOperation{
+					DocumentID: documentID,
 				}
 			}
 
 		case "INSERT", "MODIFY":
-			// Handle INSERT/UPDATE - same as Node.js (both use upsert)
+			// Handle INSERT/UPDATE - use upsert with auto-generated ID
 			if record.DynamoDB.NewImage != nil {
-				firestoreDoc, convertErr := r.converter.ConvertDocument(record.DynamoDB.NewImage)
+				documentID, firestoreDoc, convertErr := r.converter.ConvertDocument(record.DynamoDB.NewImage)
 				if convertErr != nil {
 					logger.Warn("Failed to convert new image", zap.Error(convertErr))
 					continue
 				}
 				operation = &firestore.UpsertOperation{
-					Document: firestoreDoc,
-					Filter:   nil, // Will use _id from document
+					DocumentID:  documentID,
+					Document:    firestoreDoc,
+					OriginalKey: record.DynamoDB.Keys,
 				}
 			}
 		}
@@ -632,37 +632,33 @@ func parseSequenceNumber(seqNum string) (int64, error) {
 	return result, nil
 }
 
-// createDeleteFilter creates a proper delete filter using primary key mapping
-func (r *Replicator) createDeleteFilter(keys map[string]interface{}) map[string]interface{} {
-	if r.pair.Mapping.PrimaryKeyMapping != nil {
-		sourceField := r.pair.Mapping.PrimaryKeyMapping.SourceField
-		targetField := r.pair.Mapping.PrimaryKeyMapping.TargetField
-
-		if keyValue, exists := keys[sourceField]; exists {
-			convertedKey, err := r.converter.ConvertValue(sourceField, keyValue)
-			if err == nil {
-				r.logger.Debug("Created delete filter using primary key mapping",
-					zap.String("sourceField", sourceField),
-					zap.String("targetField", targetField),
-					zap.Any("keyValue", convertedKey))
-				return map[string]interface{}{targetField: convertedKey}
-			} else {
-				r.logger.Warn("Failed to convert primary key for delete filter",
-					zap.String("sourceField", sourceField),
-					zap.Error(err))
-			}
-		}
+// findDocumentIDByKeys finds a Firestore document ID using DynamoDB keys
+func (r *Replicator) findDocumentIDByKeys(ctx context.Context, keys map[string]interface{}) (string, error) {
+	if r.pair.Mapping.PrimaryKeyMapping == nil {
+		return "", fmt.Errorf("no primary key mapping configured")
 	}
 
-	// Fallback to converted keys if primary key mapping fails or doesn't exist
-	convertedKeys, err := r.converter.ConvertDocument(keys)
+	// Extract partition and sort key values
+	partitionKey, sortKey := r.converter.ExtractKeyValues(keys)
+
+	if partitionKey == nil {
+		return "", fmt.Errorf("partition key not found in keys")
+	}
+
+	// Use Firestore client to find document by keys
+	documentID, err := r.firestoreClient.FindDocumentByKey(
+		ctx,
+		r.pair.Target.Collection,
+		partitionKey,
+		sortKey,
+		r.pair.Mapping.PrimaryKeyMapping,
+	)
+
 	if err != nil {
-		r.logger.Warn("Failed to convert keys for delete filter", zap.Error(err))
-		return nil
+		return "", fmt.Errorf("failed to find document by key: %w", err)
 	}
 
-	r.logger.Debug("Created delete filter using converted keys", zap.Any("filter", convertedKeys))
-	return convertedKeys
+	return documentID, nil
 }
 
 // processShardSequentially processes a single shard sequentially

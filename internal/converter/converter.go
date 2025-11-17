@@ -26,40 +26,65 @@ func NewDocumentConverter(mapping config.MappingConfig, logger *zap.Logger) *Doc
 	}
 }
 
-// ConvertDocument converts a DynamoDB item to a MongoDB document
-func (c *DocumentConverter) ConvertDocument(item map[string]interface{}) (map[string]interface{}, error) {
+// ConvertDocument converts a DynamoDB item to a Firestore document
+// Returns: (documentID, document, error)
+// documentID will be empty string to let Firestore auto-generate
+func (c *DocumentConverter) ConvertDocument(item map[string]interface{}) (string, map[string]interface{}, error) {
 	if item == nil {
-		return nil, fmt.Errorf("input item is nil")
+		return "", nil, fmt.Errorf("input item is nil")
 	}
 
 	result := make(map[string]interface{})
 
-	// Handle primary key mapping first
+	// Handle primary key mapping - store keys as indexed fields
 	if c.mapping.PrimaryKeyMapping != nil {
-		if primaryKeyValue, exists := item[c.mapping.PrimaryKeyMapping.SourceField]; exists {
-			// Convert the primary key value
-			convertedPK, err := c.convertValue(c.mapping.PrimaryKeyMapping.SourceField, primaryKeyValue)
-			if err != nil {
-				return nil, fmt.Errorf("failed to convert primary key field '%s': %w", c.mapping.PrimaryKeyMapping.SourceField, err)
+		// Store partition key
+		if c.mapping.PrimaryKeyMapping.PartitionKey != nil {
+			pkValue, pkExists := item[c.mapping.PrimaryKeyMapping.PartitionKey.SourceField]
+			if pkExists {
+				convertedPK, err := c.convertValue(c.mapping.PrimaryKeyMapping.PartitionKey.SourceField, pkValue)
+				if err != nil {
+					return "", nil, fmt.Errorf("failed to convert partition key: %w", err)
+				}
+				result[c.mapping.PrimaryKeyMapping.PartitionKey.TargetField] = convertedPK
 			}
-			result[c.mapping.PrimaryKeyMapping.TargetField] = convertedPK
+		}
 
-			c.logger.Debug("Mapped primary key",
-				zap.String("sourceField", c.mapping.PrimaryKeyMapping.SourceField),
-				zap.String("targetField", c.mapping.PrimaryKeyMapping.TargetField),
-				zap.Any("value", convertedPK))
+		// Store sort key if exists
+		if c.mapping.PrimaryKeyMapping.SortKey != nil {
+			skValue, skExists := item[c.mapping.PrimaryKeyMapping.SortKey.SourceField]
+			if skExists {
+				convertedSK, err := c.convertValue(c.mapping.PrimaryKeyMapping.SortKey.SourceField, skValue)
+				if err != nil {
+					return "", nil, fmt.Errorf("failed to convert sort key: %w", err)
+				}
+				result[c.mapping.PrimaryKeyMapping.SortKey.TargetField] = convertedSK
+			}
+		}
+
+		// Create composite key field if configured
+		if c.mapping.PrimaryKeyMapping.CompositeKeyField != "" {
+			compositeKey := c.buildCompositeKey(item)
+			if compositeKey != "" {
+				result[c.mapping.PrimaryKeyMapping.CompositeKeyField] = compositeKey
+			}
 		}
 	}
 
-	// Convert other fields (excluding the source primary key field to avoid duplication)
+	// Convert other fields (excluding source key fields to avoid duplication)
 	for key, value := range item {
-		// Skip the source primary key field if it's already been mapped to avoid duplication
-		if c.mapping.PrimaryKeyMapping != nil && key == c.mapping.PrimaryKeyMapping.SourceField {
-			continue
+		// Skip source key fields if they've been mapped
+		if c.mapping.PrimaryKeyMapping != nil {
+			if c.mapping.PrimaryKeyMapping.PartitionKey != nil && key == c.mapping.PrimaryKeyMapping.PartitionKey.SourceField {
+				continue
+			}
+			if c.mapping.PrimaryKeyMapping.SortKey != nil && key == c.mapping.PrimaryKeyMapping.SortKey.SourceField {
+				continue
+			}
 		}
 
 		// Apply field naming convention
-		mongoKey := config.ApplyNamingConvention(key, c.mapping.FieldNaming)
+		firestoreKey := config.ApplyNamingConvention(key, c.mapping.FieldNaming)
 
 		// Convert value
 		convertedValue, err := c.convertValue(key, value)
@@ -68,19 +93,19 @@ func (c *DocumentConverter) ConvertDocument(item map[string]interface{}) (map[st
 				zap.String("field", key),
 				zap.Error(err),
 				zap.Any("value", value))
-			// Skip problematic fields rather than failing the entire document
 			continue
 		}
 
-		result[mongoKey] = convertedValue
+		result[firestoreKey] = convertedValue
 	}
 
 	// Apply custom transforms
 	if err := c.applyCustomTransforms(result); err != nil {
-		return nil, fmt.Errorf("failed to apply custom transforms: %w", err)
+		return "", nil, fmt.Errorf("failed to apply custom transforms: %w", err)
 	}
 
-	return result, nil
+	// Return empty string for document ID (Firestore will auto-generate)
+	return "", result, nil
 }
 
 // ConvertValue converts a single value from DynamoDB to MongoDB format (public method)
@@ -339,50 +364,51 @@ func (c *DocumentConverter) setNestedValue(document map[string]interface{}, path
 	return nil
 }
 
-// ConvertStreamRecord converts a DynamoDB stream record to MongoDB operations
-func (c *DocumentConverter) ConvertStreamRecord(eventName string, keys, newImage, oldImage map[string]interface{}) (interface{}, error) {
-	switch eventName {
-	case "INSERT", "MODIFY":
-		if newImage == nil {
-			return nil, fmt.Errorf("newImage is required for %s events", eventName)
-		}
-
-		mongoDoc, err := c.ConvertDocument(newImage)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert new image: %w", err)
-		}
-
-		return &UpsertOperation{
-			Document: mongoDoc,
-			Filter:   nil, // Will use _id from document
-		}, nil
-
-	case "REMOVE":
-		if keys == nil {
-			return nil, fmt.Errorf("keys are required for REMOVE events")
-		}
-
-		mongoKeys, err := c.ConvertDocument(keys)
-		if err != nil {
-			return nil, fmt.Errorf("failed to convert keys: %w", err)
-		}
-
-		return &DeleteOperation{
-			Filter: mongoKeys,
-		}, nil
-
-	default:
-		return nil, fmt.Errorf("unsupported event name: %s", eventName)
+// buildCompositeKey builds a composite key from partition and sort keys
+func (c *DocumentConverter) buildCompositeKey(item map[string]interface{}) string {
+	if c.mapping.PrimaryKeyMapping == nil {
+		return ""
 	}
+
+	delimiter := c.mapping.PrimaryKeyMapping.Delimiter
+	if delimiter == "" {
+		delimiter = "#"
+	}
+
+	var parts []string
+
+	// Add partition key
+	if c.mapping.PrimaryKeyMapping.PartitionKey != nil {
+		if val, exists := item[c.mapping.PrimaryKeyMapping.PartitionKey.SourceField]; exists {
+			parts = append(parts, fmt.Sprintf("%v", val))
+		}
+	}
+
+	// Add sort key if exists
+	if c.mapping.PrimaryKeyMapping.SortKey != nil {
+		if val, exists := item[c.mapping.PrimaryKeyMapping.SortKey.SourceField]; exists {
+			parts = append(parts, fmt.Sprintf("%v", val))
+		}
+	}
+
+	return strings.Join(parts, delimiter)
 }
 
-// UpsertOperation represents an upsert operation for stream processing
-type UpsertOperation struct {
-	Document map[string]interface{}
-	Filter   map[string]interface{}
-}
+// ExtractKeyValues extracts partition and sort key values from a DynamoDB item
+func (c *DocumentConverter) ExtractKeyValues(keys map[string]interface{}) (partitionKey, sortKey interface{}) {
+	if c.mapping.PrimaryKeyMapping == nil {
+		return nil, nil
+	}
 
-// DeleteOperation represents a delete operation for stream processing
-type DeleteOperation struct {
-	Filter map[string]interface{}
+	// Extract partition key
+	if c.mapping.PrimaryKeyMapping.PartitionKey != nil {
+		partitionKey = keys[c.mapping.PrimaryKeyMapping.PartitionKey.SourceField]
+	}
+
+	// Extract sort key if exists
+	if c.mapping.PrimaryKeyMapping.SortKey != nil {
+		sortKey = keys[c.mapping.PrimaryKeyMapping.SortKey.SourceField]
+	}
+
+	return partitionKey, sortKey
 }

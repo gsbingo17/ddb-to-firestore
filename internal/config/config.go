@@ -38,10 +38,18 @@ type ParallelismConfig struct {
 
 // FirestoreConfig contains global Firestore connection settings
 type FirestoreConfig struct {
-	ConnectionString string              `json:"connectionString"`
-	WriteConcern     *WriteConcernConfig `json:"writeConcern,omitempty"`
-	ReadPreference   string              `json:"readPreference,omitempty"`
-	ReadConcern      string              `json:"readConcern,omitempty"`
+	ProjectID       string         `json:"projectId"`           // GCP Project ID
+	CredentialsFile string         `json:"credentialsFile"`     // Path to service account JSON
+	DatabaseID      string         `json:"databaseId"`          // Firestore database ID (optional, default: "(default)")
+	Timeouts        *TimeoutConfig `json:"timeouts,omitempty"`
+	MaxRetries      int            `json:"maxRetries,omitempty"` // Firestore-specific retries
+}
+
+// TimeoutConfig contains timeout settings for Firestore operations
+type TimeoutConfig struct {
+	ConnectionTimeoutMs int `json:"connectionTimeoutMs"` // Connection establishment timeout
+	PingTimeoutMs       int `json:"pingTimeoutMs"`       // Ping operation timeout
+	OperationTimeoutMs  int `json:"operationTimeoutMs"`  // General operation timeout
 }
 
 // WriteConcernConfig represents MongoDB write concern settings
@@ -84,17 +92,26 @@ type TargetConfig struct {
 
 // MappingConfig contains data transformation settings
 type MappingConfig struct {
-	CollectionNaming  string             `json:"collectionNaming"`            // "preserve", "snake_case", "camelCase"
-	FieldNaming       string             `json:"fieldNaming"`                 // "preserve", "snake_case", "camelCase"
-	IndexCreation     bool               `json:"indexCreation"`               // Auto-create indexes
-	PrimaryKeyMapping *PrimaryKeyMapping `json:"primaryKeyMapping,omitempty"` // Primary key field mapping
-	CustomTransforms  []TransformConfig  `json:"customTransforms,omitempty"`
+	CollectionNaming     string             `json:"collectionNaming"`            // "preserve", "snake_case", "camelCase"
+	FieldNaming          string             `json:"fieldNaming"`                 // "preserve", "snake_case", "camelCase"
+	IndexCreation        bool               `json:"indexCreation"`               // Auto-create indexes
+	PrimaryKeyMapping    *PrimaryKeyMapping `json:"primaryKeyMapping,omitempty"` // Primary key field mapping
+	OriginalKeyFieldName string             `json:"originalKeyFieldName"`        // Field name to store original DynamoDB key
+	CustomTransforms     []TransformConfig  `json:"customTransforms,omitempty"`
 }
 
-// PrimaryKeyMapping defines how to map DynamoDB primary key to MongoDB _id
+// PrimaryKeyMapping defines how to map DynamoDB primary key for Firestore lookups
 type PrimaryKeyMapping struct {
-	SourceField string `json:"sourceField"` // DynamoDB field name (e.g., "id", "userId")
-	TargetField string `json:"targetField"` // MongoDB field name (e.g., "_id")
+	PartitionKey      *KeyFieldMapping `json:"partitionKey"`                // Partition key mapping
+	SortKey           *KeyFieldMapping `json:"sortKey,omitempty"`           // Sort key mapping (optional)
+	CompositeKeyField string           `json:"compositeKeyField,omitempty"` // Single field for composite key (e.g., "_composite_key")
+	Delimiter         string           `json:"delimiter,omitempty"`         // Delimiter for composite key (default: "#")
+}
+
+// KeyFieldMapping defines mapping for a single key field
+type KeyFieldMapping struct {
+	SourceField string `json:"sourceField"` // DynamoDB field name
+	TargetField string `json:"targetField"` // Firestore field name
 }
 
 // TransformConfig represents field transformation rules
@@ -155,12 +172,13 @@ var DefaultConfig = Config{
 		MaxConcurrentPairs: 1,
 	},
 	Firestore: FirestoreConfig{
-		ReadPreference: "primary",
-		WriteConcern: &WriteConcernConfig{
-			W:        "majority",
-			J:        true,
-			WTimeout: 5000,
+		DatabaseID: "(default)",
+		Timeouts: &TimeoutConfig{
+			ConnectionTimeoutMs: 30000, // 30 seconds for connection establishment
+			PingTimeoutMs:       30000, // 30 seconds for ping operations
+			OperationTimeoutMs:  60000, // 60 seconds for general operations
 		},
+		MaxRetries: 3,
 	},
 	Checkpoint: CheckpointConfig{
 		Storage:       "file",
@@ -224,8 +242,16 @@ func (c *Config) Validate() error {
 	}
 
 	// Validate Firestore connection
-	if c.Firestore.ConnectionString == "" {
-		return fmt.Errorf("firestore.connectionString is required")
+	if c.Firestore.ProjectID == "" {
+		return fmt.Errorf("firestore.projectId is required")
+	}
+	
+	// credentialsFile is optional - if not provided, will use Application Default Credentials (ADC)
+	// ADC looks for credentials in: GOOGLE_APPLICATION_CREDENTIALS env var, gcloud auth, or GCE/GKE service account
+	
+	// Validate batch size doesn't exceed Firestore limit
+	if c.Migration.BatchSize > 500 {
+		return fmt.Errorf("batchSize cannot exceed 500 (Firestore limit), got: %d", c.Migration.BatchSize)
 	}
 
 	// Validate database pairs
@@ -308,12 +334,29 @@ func (dp *DatabasePair) Validate() error {
 
 	// Validate primary key mapping
 	if dp.Mapping.PrimaryKeyMapping != nil {
-		if dp.Mapping.PrimaryKeyMapping.SourceField == "" {
-			return fmt.Errorf("primaryKeyMapping.sourceField is required")
+		if dp.Mapping.PrimaryKeyMapping.PartitionKey == nil {
+			return fmt.Errorf("primaryKeyMapping.partitionKey is required")
 		}
-		if dp.Mapping.PrimaryKeyMapping.TargetField == "" {
-			return fmt.Errorf("primaryKeyMapping.targetField is required")
+		if dp.Mapping.PrimaryKeyMapping.PartitionKey.SourceField == "" {
+			return fmt.Errorf("primaryKeyMapping.partitionKey.sourceField is required")
 		}
+		if dp.Mapping.PrimaryKeyMapping.PartitionKey.TargetField == "" {
+			return fmt.Errorf("primaryKeyMapping.partitionKey.targetField is required")
+		}
+		// Sort key is optional
+		if dp.Mapping.PrimaryKeyMapping.SortKey != nil {
+			if dp.Mapping.PrimaryKeyMapping.SortKey.SourceField == "" {
+				return fmt.Errorf("primaryKeyMapping.sortKey.sourceField is required when sortKey is defined")
+			}
+			if dp.Mapping.PrimaryKeyMapping.SortKey.TargetField == "" {
+				return fmt.Errorf("primaryKeyMapping.sortKey.targetField is required when sortKey is defined")
+			}
+		}
+	}
+	
+	// Validate or set default for originalKeyFieldName
+	if dp.Mapping.OriginalKeyFieldName == "" {
+		dp.Mapping.OriginalKeyFieldName = "dynamodb_key" // Set default
 	}
 
 	// Validate custom transforms

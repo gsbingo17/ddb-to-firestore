@@ -72,7 +72,9 @@ func (wp *WriterPool) worker(id int) {
 
 			wp.workers <- struct{}{} // Acquire worker slot
 
-			err := wp.client.ExecuteBatch(context.Background(), job.Database, job.Collection, job.Operations)
+			// Create context for the operation
+			ctx := context.Background()
+			err := wp.client.ExecuteBatch(ctx, job.Database, job.Collection, job.Operations)
 
 			job.ResultChan <- err // Send result back to caller
 			<-wp.workers          // Release worker slot

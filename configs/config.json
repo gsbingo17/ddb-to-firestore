@@ -2,7 +2,7 @@
   "migration": {
     "mode": "live",
     "batchSize": 200,
-    "checkpointFrequency": 10,
+    "checkpointFrequency": 1,
     "maxRetries": 3,
     "retryDelayMs": 1000
   },
@@ -13,7 +13,12 @@
     "maxConcurrentPairs": 1
   },
   "firestore": {
-   "connectionString": "mongodb://UID.LOCATION.firestore.goog:443/DATABASE_ID?loadBalanced=true&tls=true&retryWrites=false"
+    "connectionString": "mongodb://test:YR4deffoISPrj64LULBKWQr_m42qe7QyA_9AGKw3nPbt3m_3@fbb555cd-64f4-406f-b2b9-2a9b55457d4b.us-central1.firestore.goog:443/target?loadBalanced=true&tls=true&authMechanism=SCRAM-SHA-256&retryWrites=false",
+    "timeouts": {
+      "connectionTimeoutMs": 60000,
+      "pingTimeoutMs": 60000,
+      "operationTimeoutMs": 120000
+    }
   },
   "databasePairs": [
     {
@@ -24,17 +29,13 @@
         "endpoint": "http://localhost:32331"
       },
       "target": {
-        "database": "my-database",
+        "database": "target",
         "collection": "mock_data"
       },
       "mapping": {
         "collectionNaming": "preserve",
         "fieldNaming": "preserve",
-        "indexCreation": true,
-        "primaryKeyMapping": {
-          "sourceField": "id",
-          "targetField": "_id"
-        }
+        "indexCreation": true
       }
     }
   ],

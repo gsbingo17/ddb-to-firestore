@@ -251,7 +251,7 @@ func (m *Migrator) processBatchWithRetry(ctx context.Context, items []map[string
 	// Convert DynamoDB items to Firestore operations
 	for _, item := range items {
 		// Convert item using the converter
-		firestoreDoc, err := m.converter.ConvertDocument(item)
+		documentID, firestoreDoc, err := m.converter.ConvertDocument(item)
 		if err != nil {
 			logger.Warn("Failed to convert document", zap.Error(err), zap.Any("item", item))
 			continue
@@ -259,8 +259,9 @@ func (m *Migrator) processBatchWithRetry(ctx context.Context, items []map[string
 
 		// Create upsert operation
 		operation := &firestore.UpsertOperation{
-			Document: firestoreDoc,
-			Filter:   nil, // Will use _id from document
+			DocumentID:  documentID,
+			Document:    firestoreDoc,
+			OriginalKey: item, // Store original DynamoDB item as key
 		}
 		operations = append(operations, operation)
 	}
