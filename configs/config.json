@@ -1,6 +1,6 @@
 {
   "migration": {
-    "mode": "live",
+    "mode": "migrate",
     "batchSize": 200,
     "checkpointFrequency": 1,
     "maxRetries": 3,
@@ -13,12 +13,8 @@
     "maxConcurrentPairs": 1
   },
   "firestore": {
-    "connectionString": "mongodb://test:YR4deffoISPrj64LULBKWQr_m42qe7QyA_9AGKw3nPbt3m_3@fbb555cd-64f4-406f-b2b9-2a9b55457d4b.us-central1.firestore.goog:443/target?loadBalanced=true&tls=true&authMechanism=SCRAM-SHA-256&retryWrites=false",
-    "timeouts": {
-      "connectionTimeoutMs": 60000,
-      "pingTimeoutMs": 60000,
-      "operationTimeoutMs": 120000
-    }
+    "projectId": "your-gcp-project-id",
+    "credentialsFile": "/path/to/service-account-key.json"
   },
   "databasePairs": [
     {
@@ -35,7 +31,11 @@
       "mapping": {
         "collectionNaming": "preserve",
         "fieldNaming": "preserve",
-        "indexCreation": true
+        "indexCreation": true,
+        "keyFields": {
+          "partitionKey": "id",
+          "sortKey": ""
+        }
       }
     }
   ],
