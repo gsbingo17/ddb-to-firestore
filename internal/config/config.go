@@ -38,9 +38,9 @@ type ParallelismConfig struct {
 
 // FirestoreConfig contains global Firestore connection settings
 type FirestoreConfig struct {
-	ProjectID       string         `json:"projectId"`           // GCP Project ID
-	CredentialsFile string         `json:"credentialsFile"`     // Path to service account JSON
-	DatabaseID      string         `json:"databaseId"`          // Firestore database ID (optional, default: "(default)")
+	ProjectID       string         `json:"projectId"`       // GCP Project ID
+	CredentialsFile string         `json:"credentialsFile"` // Path to service account JSON
+	DatabaseID      string         `json:"databaseId"`      // Firestore database ID (optional, default: "(default)")
 	Timeouts        *TimeoutConfig `json:"timeouts,omitempty"`
 	MaxRetries      int            `json:"maxRetries,omitempty"` // Firestore-specific retries
 }
@@ -92,12 +92,26 @@ type TargetConfig struct {
 
 // MappingConfig contains data transformation settings
 type MappingConfig struct {
-	CollectionNaming     string             `json:"collectionNaming"`            // "preserve", "snake_case", "camelCase"
-	FieldNaming          string             `json:"fieldNaming"`                 // "preserve", "snake_case", "camelCase"
-	IndexCreation        bool               `json:"indexCreation"`               // Auto-create indexes
+	CollectionNaming string `json:"collectionNaming"` // "preserve", "snake_case", "camelCase"
+	FieldNaming      string `json:"fieldNaming"`      // "preserve", "snake_case", "camelCase"
+	IndexCreation    bool   `json:"indexCreation"`    // Auto-create indexes
+
+	// Simple key field configuration (recommended)
+	KeyFields              *KeyFields `json:"keyFields,omitempty"`              // DynamoDB key field names
+	UseCompositeDocumentId bool       `json:"useCompositeDocumentId,omitempty"` // Use keys as Firestore document ID
+	DocumentIdDelimiter    string     `json:"documentIdDelimiter,omitempty"`    // Delimiter for composite doc ID (default: "_")
+
+	// Legacy configuration (kept for backward compatibility)
 	PrimaryKeyMapping    *PrimaryKeyMapping `json:"primaryKeyMapping,omitempty"` // Primary key field mapping
 	OriginalKeyFieldName string             `json:"originalKeyFieldName"`        // Field name to store original DynamoDB key
-	CustomTransforms     []TransformConfig  `json:"customTransforms,omitempty"`
+
+	CustomTransforms []TransformConfig `json:"customTransforms,omitempty"`
+}
+
+// KeyFields defines the DynamoDB key field names
+type KeyFields struct {
+	PartitionKey string `json:"partitionKey"` // DynamoDB partition key field name (required)
+	SortKey      string `json:"sortKey"`      // DynamoDB sort key field name (optional, empty if not used)
 }
 
 // PrimaryKeyMapping defines how to map DynamoDB primary key for Firestore lookups
@@ -245,10 +259,10 @@ func (c *Config) Validate() error {
 	if c.Firestore.ProjectID == "" {
 		return fmt.Errorf("firestore.projectId is required")
 	}
-	
+
 	// credentialsFile is optional - if not provided, will use Application Default Credentials (ADC)
 	// ADC looks for credentials in: GOOGLE_APPLICATION_CREDENTIALS env var, gcloud auth, or GCE/GKE service account
-	
+
 	// Validate batch size doesn't exceed Firestore limit
 	if c.Migration.BatchSize > 500 {
 		return fmt.Errorf("batchSize cannot exceed 500 (Firestore limit), got: %d", c.Migration.BatchSize)
@@ -353,7 +367,7 @@ func (dp *DatabasePair) Validate() error {
 			}
 		}
 	}
-	
+
 	// Validate or set default for originalKeyFieldName
 	if dp.Mapping.OriginalKeyFieldName == "" {
 		dp.Mapping.OriginalKeyFieldName = "dynamodb_key" // Set default

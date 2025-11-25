@@ -28,7 +28,7 @@ func NewDocumentConverter(mapping config.MappingConfig, logger *zap.Logger) *Doc
 
 // ConvertDocument converts a DynamoDB item to a Firestore document
 // Returns: (documentID, document, error)
-// documentID will be empty string to let Firestore auto-generate
+// documentID will be empty string to let Firestore auto-generate, or composite key if configured
 func (c *DocumentConverter) ConvertDocument(item map[string]interface{}) (string, map[string]interface{}, error) {
 	if item == nil {
 		return "", nil, fmt.Errorf("input item is nil")
@@ -36,7 +36,13 @@ func (c *DocumentConverter) ConvertDocument(item map[string]interface{}) (string
 
 	result := make(map[string]interface{})
 
-	// Handle primary key mapping - store keys as indexed fields
+	// Generate document ID if composite document ID is enabled
+	var documentID string
+	if c.mapping.UseCompositeDocumentId && c.mapping.KeyFields != nil {
+		documentID = c.buildCompositeDocumentID(item)
+	}
+
+	// Handle primary key mapping - store keys as indexed fields (for backward compatibility)
 	if c.mapping.PrimaryKeyMapping != nil {
 		// Store partition key
 		if c.mapping.PrimaryKeyMapping.PartitionKey != nil {
@@ -104,8 +110,71 @@ func (c *DocumentConverter) ConvertDocument(item map[string]interface{}) (string
 		return "", nil, fmt.Errorf("failed to apply custom transforms: %w", err)
 	}
 
-	// Return empty string for document ID (Firestore will auto-generate)
-	return "", result, nil
+	// Return document ID (empty string if not using composite IDs, which lets Firestore auto-generate)
+	return documentID, result, nil
+}
+
+// buildCompositeDocumentID builds a Firestore document ID from DynamoDB key fields
+func (c *DocumentConverter) buildCompositeDocumentID(item map[string]interface{}) string {
+	if c.mapping.KeyFields == nil {
+		return ""
+	}
+
+	delimiter := c.mapping.DocumentIdDelimiter
+	if delimiter == "" {
+		delimiter = "_"
+	}
+
+	// Get partition key value
+	pkValue, exists := item[c.mapping.KeyFields.PartitionKey]
+	if !exists {
+		c.logger.Warn("Partition key not found in item",
+			zap.String("partitionKey", c.mapping.KeyFields.PartitionKey))
+		return ""
+	}
+
+	pkStr := sanitizeDocumentID(fmt.Sprintf("%v", pkValue))
+
+	// If no sort key, return just partition key
+	if c.mapping.KeyFields.SortKey == "" {
+		return pkStr
+	}
+
+	// Get sort key value
+	skValue, exists := item[c.mapping.KeyFields.SortKey]
+	if !exists {
+		// Sort key configured but not found - just use partition key
+		c.logger.Debug("Sort key not found in item",
+			zap.String("sortKey", c.mapping.KeyFields.SortKey))
+		return pkStr
+	}
+
+	skStr := sanitizeDocumentID(fmt.Sprintf("%v", skValue))
+	return pkStr + delimiter + skStr
+}
+
+// sanitizeDocumentID sanitizes a string to be a valid Firestore document ID
+func sanitizeDocumentID(id string) string {
+	// Firestore document ID restrictions:
+	// - Must not contain "/"
+	// - Must not be "." or ".."
+	// - Max 1500 bytes
+	// - Must not match the regular expression __.*__
+
+	// Replace "/" with "-"
+	id = strings.ReplaceAll(id, "/", "-")
+
+	// Handle special cases
+	if id == "." || id == ".." {
+		id = "_" + id
+	}
+
+	// Truncate if too long (leaving some margin for safety)
+	if len(id) > 1500 {
+		id = id[:1500]
+	}
+
+	return id
 }
 
 // ConvertValue converts a single value from DynamoDB to MongoDB format (public method)

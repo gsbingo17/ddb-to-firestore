@@ -291,102 +291,91 @@ The tool uses a robust checkpoint system:
 | Binary Set | Array | Array of bytes |
 | NULL | Null | Direct mapping |
 
-## Composite Primary Key Support
+## Document ID Strategies
 
-### Overview
+The tool supports two strategies for generating Firestore document IDs:
 
-Firestore documents use auto-generated IDs, but the tool preserves DynamoDB's composite key structure as indexed fields within each document for efficient querying and updates.
+### Strategy 1: Auto-Generated IDs (Default)
 
-### Key Storage Strategy
+Firestore automatically generates unique document IDs, and DynamoDB keys are stored as indexed fields for querying.
 
-**DynamoDB Table with Composite Key:**
-```json
-// Partition Key: "userId"
-// Sort Key: "timestamp"
-{
-  "userId": "user123",
-  "timestamp": "2024-01-15T10:30:00Z",
-  "name": "John Doe",
-  "email": "john@example.com"
-}
-```
-
-**Firestore Document:**
-```json
-// Document ID: auto-generated (e.g., "abc123xyz")
-{
-  "__key_userId": "user123",        // Indexed partition key
-  "__key_timestamp": "2024-01-15T10:30:00Z",  // Indexed sort key
-  "userId": "user123",              // Original field
-  "timestamp": "2024-01-15T10:30:00Z",  // Original field
-  "name": "John Doe",
-  "email": "john@example.com"
-}
-```
-
-### Configuration
-
+**Configuration:**
 ```json
 {
   "mapping": {
     "keyFields": {
       "partitionKey": "userId",
       "sortKey": "timestamp"
-    }
+    },
+    "useCompositeDocumentId": false
   }
 }
 ```
 
-### Simple Primary Key (No Sort Key)
+**Result:**
+```
+DynamoDB: {userId: "user123", timestamp: "2024-01-15", name: "John"}
+Firestore Doc ID: "abc123xyz456" (auto-generated)
+Firestore Data: {
+  "__key_userId": "user123",      // Indexed for queries
+  "__key_timestamp": "2024-01-15", // Indexed for queries  
+  "userId": "user123",
+  "timestamp": "2024-01-15",
+  "name": "John"
+}
+```
 
-For tables with only a partition key:
+### Strategy 2: Composite Document IDs (Opt-In)
 
+Use DynamoDB keys as the Firestore document ID for faster direct access and simpler documents.
+
+**Configuration:**
+```json
+{
+  "mapping": {
+    "keyFields": {
+      "partitionKey": "userId",
+      "sortKey": "timestamp"
+    },
+    "useCompositeDocumentId": true,
+    "documentIdDelimiter": "_"
+  }
+}
+```
+
+**Result:**
+```
+DynamoDB: {userId: "user123", timestamp: "2024-01-15", name: "John"}
+Firestore Doc ID: "user123_2024-01-15" (from DynamoDB keys)
+Firestore Data: {
+  "userId": "user123",
+  "timestamp": "2024-01-15",
+  "name": "John"
+}
+```
+
+**Simple Key Example (No Sort Key):**
 ```json
 {
   "mapping": {
     "keyFields": {
       "partitionKey": "id",
       "sortKey": ""
-    }
+    },
+    "useCompositeDocumentId": true
   }
 }
 ```
 
-**DynamoDB:**
-```json
-{
-  "id": "user123",
-  "name": "John Doe"
-}
-```
+Result: Document ID = partition key value (e.g., `user123`)
 
-**Firestore:**
-```json
-// Document ID: auto-generated
-{
-  "__key_id": "user123",  // Indexed partition key
-  "id": "user123",        // Original field
-  "name": "John Doe"
-}
-```
+**ID Sanitization:**
 
-### Benefits
+The tool automatically sanitizes document IDs to meet Firestore requirements:
+- Replaces `/` with `-`
+- Handles `.` and `..` special cases
+- Truncates to 1500 bytes maximum
 
-1. **Auto-generated IDs**: Firestore manages document IDs automatically
-2. **Efficient Queries**: Indexed key fields enable fast lookups
-3. **Update Support**: Live replication can find and update existing documents
-4. **Preserved Structure**: Original DynamoDB fields remain unchanged
-
-### Live Replication Updates
-
-During live replication, the tool uses indexed key fields to locate documents:
-
-```go
-// Query for existing document using composite key
-query := collection.
-    Where("__key_userId", "==", "user123").
-    Where("__key_timestamp", "==", "2024-01-15T10:30:00Z")
-```
 
 ## Monitoring and Logging
 

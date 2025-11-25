@@ -13,7 +13,7 @@
   },
   "firestore": {
     "projectId": "your-project",
-    "databaseId": "you-db",
+    "databaseId": "your-db",
     "timeouts": {
       "connectionTimeoutMs": 30000,
       "pingTimeoutMs": 30000,
@@ -26,24 +26,30 @@
       "name": "users-migration",
       "source": {
         "region": "us-west-2",
-        "tableName": "mock-data-table-2",
+        "tableName": "test",
         "endpoint": "http://localhost:8000"
       },
       "target": {
         "database": "your-db",
-        "collection": "mock-data-table"
+        "collection": "test-table"
       },
       "mapping": {
         "collectionNaming": "preserve",
         "fieldNaming": "preserve",
-        "indexCreation": false
+        "indexCreation": false,
+        "keyFields": {
+          "partitionKey": "id",
+          "sortKey": "name"
+        },
+        "useCompositeDocumentId": true,
+        "documentIdDelimiter": "_"
       }
     }
   ],
   "pairProcessing": {
     "orders-migration": {
-      "batchSize": 200,
-      "maxRetries": 5
+      "batchSize": 128,
+      "maxRetries": 3
     }
   },
   "checkpoint": {
