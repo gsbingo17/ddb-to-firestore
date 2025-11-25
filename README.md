@@ -317,8 +317,6 @@ Firestore automatically generates unique document IDs, and DynamoDB keys are sto
 DynamoDB: {userId: "user123", timestamp: "2024-01-15", name: "John"}
 Firestore Doc ID: "abc123xyz456" (auto-generated)
 Firestore Data: {
-  "__key_userId": "user123",      // Indexed for queries
-  "__key_timestamp": "2024-01-15", // Indexed for queries  
   "userId": "user123",
   "timestamp": "2024-01-15",
   "name": "John"
